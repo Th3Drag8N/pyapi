@@ -146,6 +146,8 @@ async def episodes(
                 is_recap  = jikan_ep["isRecap"]
             elif anikage_ep:
                 is_filler = anikage_ep.get("isFiller", False)
+            elif animex_ep:
+                is_filler = animex_ep.get("isFiller", False)
 
         # Title / description / image
         title = anime_title
@@ -155,16 +157,24 @@ async def episodes(
 
         if anikage_ep and anikage_ep.get("title") and anikage_ep["title"] != anime_title:
             title = anikage_ep["title"]
+        elif animex_ep and animex_ep.get("title") and animex_ep["title"] != anime_title:
+            title = animex_ep["title"]
         elif jikan_ep and jikan_ep.get("title"):
             title = jikan_ep["title"]
 
         if anikage_ep and anikage_ep.get("description"):
             description = anikage_ep["description"]
+        elif animex_ep and animex_ep.get("description"):
+            description = animex_ep["description"]
+
         if anikage_ep and anikage_ep.get("img"):
             image = anikage_ep["img"]
+        elif animex_ep and animex_ep.get("img"):
+            image = animex_ep["img"]
 
         jp_ep_title = (
             (None if anikage_ep and anikage_ep.get("title") else None)
+            or (None if animex_ep and animex_ep.get("title") else None)
             or (jikan_ep.get("titleJapanese") if jikan_ep else None)
             or japanese_title
         )

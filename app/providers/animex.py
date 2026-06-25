@@ -197,10 +197,15 @@ async def fetch_animex_sources(
 
 # ── Normalisers ───────────────────────────────────────────────────────────────
 def normalize_episode_item(item: dict) -> dict:
+    titles = item.get("titles", {})
     return {
         "number": int(item.get("number", 0)),
         "hasSub": bool(item.get("hasSub")),
         "hasDub": bool(item.get("hasDub")),
+        "title": titles.get("en") or titles.get("x-jat") or titles.get("ja"),
+        "description": item.get("description"),
+        "img": item.get("img"),
+        "isFiller": bool(item.get("isFiller"))
     }
 
 
