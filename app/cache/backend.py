@@ -3,7 +3,9 @@ Two-tier cache backend:
   1. In-process OrderedDict LRU (fast, zero latency)
   2. Upstash Redis REST (shared across processes/instances, fire-and-forget writes)
 
-Also exposes the shared httpx.AsyncClient used everywhere in the app.
+Also exposes the shared HTTP client used everywhere in the app.
+Uses curl_cffi for Cloudflare-protected providers (impersonates real Chrome TLS),
+and a plain httpx client for non-Cloudflare endpoints (AniList, Jikan, Upstash).
 """
 
 from __future__ import annotations
@@ -21,7 +23,12 @@ import httpx
 
 logger = logging.getLogger("th3anime.cache")
 
-# ── Shared HTTP client ────────────────────────────────────────────────────────
+# ── Shared HTTP clients ───────────────────────────────────────────────────────
+# _cf_client  : curl_cffi AsyncSession — impersonates Chrome at the TLS level,
+#               bypassing Cloudflare bot detection on datacenter IPs (Render, Vercel).
+# _http_client: plain httpx AsyncClient — used for non-Cloudflare endpoints
+#               (AniList GraphQL, Jikan REST, Upstash Redis REST, AniSkip).
+_cf_client: Any = None  # curl_cffi.requests.AsyncSession or None
 _http_client: Optional[httpx.AsyncClient] = None
 
 _DEFAULT_HEADERS = {
@@ -34,7 +41,9 @@ _DEFAULT_HEADERS = {
 
 
 async def init_http_client() -> None:
-    global _http_client
+    global _http_client, _cf_client
+
+    # Plain httpx client for non-Cloudflare services
     _http_client = httpx.AsyncClient(
         headers=_DEFAULT_HEADERS,
         follow_redirects=True,
@@ -43,18 +52,49 @@ async def init_http_client() -> None:
         http2=True,
     )
 
+    # curl_cffi Chrome-impersonating session for Cloudflare-protected providers
+    try:
+        from curl_cffi.requests import AsyncSession
+        _cf_client = AsyncSession(impersonate="chrome124")
+        logger.info("curl_cffi session initialised (Cloudflare bypass enabled)")
+    except ImportError:
+        logger.warning(
+            "curl_cffi not installed — falling back to httpx for all providers. "
+            "Stream sources may fail on datacenter IPs (Render, Vercel). "
+            "Add 'curl-cffi' to requirements.txt to fix this."
+        )
+        _cf_client = None
+
 
 async def close_http_client() -> None:
-    global _http_client
+    global _http_client, _cf_client
     if _http_client:
         await _http_client.aclose()
         _http_client = None
+    if _cf_client is not None:
+        try:
+            await _cf_client.close()
+        except Exception:
+            pass
+        _cf_client = None
 
 
 def get_client() -> httpx.AsyncClient:
+    """Return the plain httpx client (for AniList, Jikan, Upstash, etc.)."""
     if _http_client is None:
         raise RuntimeError("HTTP client not initialised — call init_http_client() first")
     return _http_client
+
+
+def get_cf_client() -> Any:
+    """
+    Return the curl_cffi session for Cloudflare-protected providers.
+    Falls back to the plain httpx client if curl_cffi is unavailable.
+    """
+    if _cf_client is not None:
+        return _cf_client
+    # Graceful degradation — providers handle this transparently
+    return get_client()
 
 
 # ── In-process LRU cache ─────────────────────────────────────────────────────

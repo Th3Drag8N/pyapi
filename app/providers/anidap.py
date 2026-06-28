@@ -15,7 +15,7 @@ from urllib.parse import quote, urlencode
 
 import httpx
 
-from app.cache.backend import get_cached_value, get_client
+from app.cache.backend import get_cached_value, get_cf_client
 
 logger = logging.getLogger("th3anime.providers.anidap")
 
@@ -55,9 +55,12 @@ _API_HEADERS = {
 
 # ── HTTP helpers ──────────────────────────────────────────────────────────────
 async def _fetch_text(url: str) -> str:
-    client: httpx.AsyncClient = get_client()
+    client = get_cf_client()
     try:
-        resp = await asyncio.wait_for(client.get(url, headers=_PAGE_HEADERS), timeout=15.0)
+        resp = await asyncio.wait_for(
+            client.get(url, headers=_PAGE_HEADERS, allow_redirects=True),
+            timeout=20.0,
+        )
     except asyncio.TimeoutError:
         raise RuntimeError(f"Anidap page request timed out: {url}")
     if resp.status_code != 200:
@@ -66,9 +69,12 @@ async def _fetch_text(url: str) -> str:
 
 
 async def _fetch_json(url: str) -> Any:
-    client: httpx.AsyncClient = get_client()
+    client = get_cf_client()
     try:
-        resp = await asyncio.wait_for(client.get(url, headers=_API_HEADERS), timeout=15.0)
+        resp = await asyncio.wait_for(
+            client.get(url, headers=_API_HEADERS),
+            timeout=20.0,
+        )
     except asyncio.TimeoutError:
         raise RuntimeError(f"Anidap API request timed out: {url}")
     if resp.status_code != 200:

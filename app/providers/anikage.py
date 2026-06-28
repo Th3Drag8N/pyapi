@@ -14,7 +14,7 @@ from typing import Any
 
 import httpx
 
-from app.cache.backend import get_cached_value, get_client
+from app.cache.backend import get_cached_value, get_cf_client
 
 logger = logging.getLogger("th3anime.providers.anikage")
 
@@ -41,9 +41,12 @@ def _encode_payload(payload: dict) -> str:
 
 # ── HTTP ─────────────────────────────────────────────────────────────────────
 async def _fetch_json(url: str) -> Any:
-    client: httpx.AsyncClient = get_client()
+    client = get_cf_client()
     try:
-        resp = await asyncio.wait_for(client.get(url, headers=_HEADERS), timeout=12.0)
+        resp = await asyncio.wait_for(
+            client.get(url, headers=_HEADERS),
+            timeout=15.0,
+        )
     except asyncio.TimeoutError:
         raise RuntimeError(f"Anikage request timed out: {url}")
 

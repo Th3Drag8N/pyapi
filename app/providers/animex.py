@@ -15,7 +15,7 @@ from urllib.parse import quote
 
 import httpx
 
-from app.cache.backend import get_cached_value, get_client
+from app.cache.backend import get_cached_value, get_cf_client
 
 logger = logging.getLogger("th3anime.providers.animex")
 
@@ -69,7 +69,21 @@ def _page_candidates(anime_id: str | int, title_data: dict) -> list[str]:
 
 
 def _extract_slug(html: str) -> str:
-    # Strategy 1: __NEXT_DATA__
+    # Strategy 1: inline JS bundle (new format since Animex dropped __NEXT_DATA__)
+    # Matches: slug:"one-piece-p8k27" or slug:"attack-on-titan-f3x9q"
+    for pat in [
+        r'slug:"([a-z0-9][a-z0-9\-]*[a-z0-9])"',
+        r"slug:'([a-z0-9][a-z0-9\-]*[a-z0-9])'",
+        r'\\bslug:"([^"]+)"',
+        r'"slug":"([^"]+)"',
+        r'slug:\s*"([^"]+)"',
+        r"slug:\s*'([^']+)'",
+    ]:
+        m = re.search(pat, html)
+        if m:
+            return m.group(1)
+
+    # Strategy 2: __NEXT_DATA__ (legacy, kept for forward compat)
     m = re.search(r'<script id="__NEXT_DATA__" type="application/json">([^<]+)</script>', html)
     if m:
         try:
@@ -90,24 +104,16 @@ def _extract_slug(html: str) -> str:
         except Exception:
             pass
 
-    # Strategy 2: inline JS patterns
-    for pat in [
-        r'\bslug:"([^"]+)"',
-        r'"slug":"([^"]+)"',
-        r'slug:\s*"([^"]+)"',
-        r"slug:\s*'([^']+)'",
-    ]:
-        m = re.search(pat, html)
-        if m:
-            return m.group(1)
-
     raise RuntimeError("Could not extract Animex slug")
 
 
 async def _fetch_text(url: str) -> str:
-    client: httpx.AsyncClient = get_client()
+    client = get_cf_client()
     try:
-        resp = await asyncio.wait_for(client.get(url, headers=_PAGE_HEADERS), timeout=15.0)
+        resp = await asyncio.wait_for(
+            client.get(url, headers=_PAGE_HEADERS, allow_redirects=True),
+            timeout=20.0,
+        )
     except asyncio.TimeoutError:
         raise RuntimeError(f"Animex page request timed out: {url}")
     if resp.status_code != 200:
@@ -116,9 +122,12 @@ async def _fetch_text(url: str) -> str:
 
 
 async def _fetch_json(url: str) -> Any:
-    client: httpx.AsyncClient = get_client()
+    client = get_cf_client()
     try:
-        resp = await asyncio.wait_for(client.get(url, headers=_API_HEADERS), timeout=15.0)
+        resp = await asyncio.wait_for(
+            client.get(url, headers=_API_HEADERS),
+            timeout=20.0,
+        )
     except asyncio.TimeoutError:
         raise RuntimeError(f"Animex API request timed out: {url}")
     if resp.status_code != 200:
