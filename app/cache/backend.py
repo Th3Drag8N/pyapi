@@ -24,11 +24,16 @@ import httpx
 logger = logging.getLogger("th3anime.cache")
 
 # ── Shared HTTP clients ───────────────────────────────────────────────────────
-# _cf_client  : curl_cffi AsyncSession — impersonates Chrome at the TLS level,
-#               bypassing Cloudflare bot detection on datacenter IPs (Render, Vercel).
-# _http_client: plain httpx AsyncClient — used for non-Cloudflare endpoints
-#               (AniList GraphQL, Jikan REST, Upstash Redis REST, AniSkip).
-_cf_client: Any = None  # curl_cffi.requests.AsyncSession or None
+# Strategy (in priority order):
+#  1. CF Worker proxy  — if WORKER_PROXY_URL is set, route all provider requests
+#     through the Cloudflare Worker. CF → CF never gets blocked.
+#  2. curl_cffi        — impersonates Chrome TLS fingerprint; beats most CF checks
+#     from fresh datacenter IPs but can still get IP-banned over time.
+#  3. httpx fallback   — plain HTTP, used when neither above is available.
+#
+# _http_client is always a plain httpx client used for non-provider endpoints
+# (AniList, Jikan, Upstash, AniSkip) which don't need Cloudflare bypass.
+_cf_client: Any = None
 _http_client: Optional[httpx.AsyncClient] = None
 
 _DEFAULT_HEADERS = {
@@ -40,10 +45,32 @@ _DEFAULT_HEADERS = {
 }
 
 
+class _WorkerProxySession:
+    """
+    Wraps httpx to route requests through a Cloudflare Worker /proxy endpoint.
+    The Worker fetches the target URL from inside CF's own network, bypassing
+    any IP-based blocks that affect Render/Vercel datacenter IPs permanently.
+
+    Usage: set WORKER_PROXY_URL=https://your-worker.workers.dev in env vars.
+    """
+
+    def __init__(self, proxy_base: str, client: httpx.AsyncClient) -> None:
+        self._proxy_base = proxy_base.rstrip("/")
+        self._client = client
+
+    async def get(self, url: str, headers: dict | None = None, **_kwargs) -> Any:
+        import json as _json
+        proxy_url = f"{self._proxy_base}/proxy?url={url}"
+        req_headers: dict = {}
+        if headers:
+            req_headers["x-proxy-headers"] = _json.dumps(headers)
+        return await self._client.get(proxy_url, headers=req_headers)
+
+
 async def init_http_client() -> None:
     global _http_client, _cf_client
 
-    # Plain httpx client for non-Cloudflare services
+    # Plain httpx — for AniList, Jikan, Upstash, AniSkip
     _http_client = httpx.AsyncClient(
         headers=_DEFAULT_HEADERS,
         follow_redirects=True,
@@ -52,16 +79,24 @@ async def init_http_client() -> None:
         http2=True,
     )
 
-    # curl_cffi Chrome-impersonating session for Cloudflare-protected providers
+    # Priority 1: CF Worker proxy
+    proxy_url = os.getenv("WORKER_PROXY_URL", "").strip()
+    if proxy_url:
+        _cf_client = _WorkerProxySession(proxy_url, _http_client)
+        logger.info("CF Worker proxy enabled — provider requests routed via %s", proxy_url)
+        return
+
+    # Priority 2: curl_cffi Chrome impersonation
     try:
         from curl_cffi.requests import AsyncSession
         _cf_client = AsyncSession(impersonate="chrome124")
-        logger.info("curl_cffi session initialised (Cloudflare bypass enabled)")
+        logger.info("curl_cffi session initialised (Chrome TLS impersonation enabled)")
     except ImportError:
         logger.warning(
-            "curl_cffi not installed — falling back to httpx for all providers. "
-            "Stream sources may fail on datacenter IPs (Render, Vercel). "
-            "Add 'curl-cffi' to requirements.txt to fix this."
+            "curl_cffi not installed and WORKER_PROXY_URL not set — "
+            "falling back to plain httpx. Provider requests may fail on "
+            "datacenter IPs (Render, Vercel). Set WORKER_PROXY_URL to your "
+            "Cloudflare Worker URL for a permanent fix."
         )
         _cf_client = None
 
@@ -71,9 +106,11 @@ async def close_http_client() -> None:
     if _http_client:
         await _http_client.aclose()
         _http_client = None
-    if _cf_client is not None:
+    if _cf_client is not None and hasattr(_cf_client, "close"):
         try:
-            await _cf_client.close()
+            result = _cf_client.close()
+            if hasattr(result, "__await__"):
+                await result
         except Exception:
             pass
         _cf_client = None
@@ -88,13 +125,13 @@ def get_client() -> httpx.AsyncClient:
 
 def get_cf_client() -> Any:
     """
-    Return the curl_cffi session for Cloudflare-protected providers.
-    Falls back to the plain httpx client if curl_cffi is unavailable.
+    Return the best available client for Cloudflare-protected providers.
+    Priority: CF Worker proxy → curl_cffi → plain httpx.
     """
     if _cf_client is not None:
         return _cf_client
-    # Graceful degradation — providers handle this transparently
     return get_client()
+
 
 
 # ── In-process LRU cache ─────────────────────────────────────────────────────

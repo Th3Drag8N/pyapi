@@ -9,13 +9,14 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import random
 import re
 from typing import Any
 from urllib.parse import quote, urlencode
 
 import httpx
 
-from app.cache.backend import get_cached_value, get_cf_client
+from app.cache.backend import get_cached_value, get_cf_client, get_client
 
 logger = logging.getLogger("th3anime.providers.anidap")
 
@@ -54,32 +55,52 @@ _API_HEADERS = {
 
 
 # ── HTTP helpers ──────────────────────────────────────────────────────────────
-async def _fetch_text(url: str) -> str:
+async def _fetch_text(url: str, _retry: int = 3) -> str:
     client = get_cf_client()
-    try:
-        resp = await asyncio.wait_for(
-            client.get(url, headers=_PAGE_HEADERS, allow_redirects=True),
-            timeout=20.0,
-        )
-    except asyncio.TimeoutError:
-        raise RuntimeError(f"Anidap page request timed out: {url}")
-    if resp.status_code != 200:
+    for attempt in range(_retry):
+        try:
+            resp = await asyncio.wait_for(
+                client.get(url, headers=_PAGE_HEADERS),
+                timeout=20.0,
+            )
+        except asyncio.TimeoutError:
+            if attempt < _retry - 1:
+                await asyncio.sleep(1.5 * (attempt + 1))
+                continue
+            raise RuntimeError(f"Anidap page request timed out: {url}")
+        if resp.status_code == 200:
+            return resp.text
+        if resp.status_code in (403, 429) and attempt < _retry - 1:
+            wait = (2 ** attempt) + random.uniform(0.5, 1.5)
+            logger.warning("Anidap page %s returned %d, retrying in %.1fs...", url, resp.status_code, wait)
+            await asyncio.sleep(wait)
+            continue
         raise RuntimeError(f"Anidap page request failed: {resp.status_code}")
-    return resp.text
+    raise RuntimeError(f"Anidap page request failed after {_retry} retries")
 
 
-async def _fetch_json(url: str) -> Any:
+async def _fetch_json(url: str, _retry: int = 3) -> Any:
     client = get_cf_client()
-    try:
-        resp = await asyncio.wait_for(
-            client.get(url, headers=_API_HEADERS),
-            timeout=20.0,
-        )
-    except asyncio.TimeoutError:
-        raise RuntimeError(f"Anidap API request timed out: {url}")
-    if resp.status_code != 200:
+    for attempt in range(_retry):
+        try:
+            resp = await asyncio.wait_for(
+                client.get(url, headers=_API_HEADERS),
+                timeout=20.0,
+            )
+        except asyncio.TimeoutError:
+            if attempt < _retry - 1:
+                await asyncio.sleep(1.5 * (attempt + 1))
+                continue
+            raise RuntimeError(f"Anidap API request timed out: {url}")
+        if resp.status_code == 200:
+            return resp.json()
+        if resp.status_code in (403, 429) and attempt < _retry - 1:
+            wait = (2 ** attempt) + random.uniform(0.5, 1.5)
+            logger.warning("Anidap API %s returned %d, retrying in %.1fs...", url, resp.status_code, wait)
+            await asyncio.sleep(wait)
+            continue
         raise RuntimeError(f"Anidap API request failed: {resp.status_code}")
-    return resp.json()
+    raise RuntimeError(f"Anidap API request failed after {_retry} retries")
 
 
 # ── Slug extraction ───────────────────────────────────────────────────────────
@@ -174,7 +195,8 @@ async def _fetch_slug(anime_id: str | int, refresh: bool = False) -> str:
                 last_err = e
         raise last_err or RuntimeError("Could not resolve Anidap slug")
 
-    return await get_cached_value(cache_key, 30 * 24 * 60 * 60 * 1000, loader, force_refresh=refresh)
+    # Slug is stable — cache for 7 days to minimize scraping requests per IP
+    return await get_cached_value(cache_key, 7 * 24 * 60 * 60 * 1000, loader, force_refresh=refresh)
 
 
 async def _fetch_playlist(master_url: str) -> dict:

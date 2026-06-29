@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import random
 import re
 import unicodedata
 from typing import Any
@@ -107,32 +108,52 @@ def _extract_slug(html: str) -> str:
     raise RuntimeError("Could not extract Animex slug")
 
 
-async def _fetch_text(url: str) -> str:
+async def _fetch_text(url: str, _retry: int = 3) -> str:
     client = get_cf_client()
-    try:
-        resp = await asyncio.wait_for(
-            client.get(url, headers=_PAGE_HEADERS, allow_redirects=True),
-            timeout=20.0,
-        )
-    except asyncio.TimeoutError:
-        raise RuntimeError(f"Animex page request timed out: {url}")
-    if resp.status_code != 200:
+    for attempt in range(_retry):
+        try:
+            resp = await asyncio.wait_for(
+                client.get(url, headers=_PAGE_HEADERS),
+                timeout=20.0,
+            )
+        except asyncio.TimeoutError:
+            if attempt < _retry - 1:
+                await asyncio.sleep(1.5 * (attempt + 1))
+                continue
+            raise RuntimeError(f"Animex page request timed out: {url}")
+        if resp.status_code == 200:
+            return resp.text
+        if resp.status_code in (403, 429) and attempt < _retry - 1:
+            wait = (2 ** attempt) + random.uniform(0.5, 1.5)
+            logger.warning("Animex page %s returned %d, retrying in %.1fs...", url, resp.status_code, wait)
+            await asyncio.sleep(wait)
+            continue
         raise RuntimeError(f"Animex page request failed: {resp.status_code}")
-    return resp.text
+    raise RuntimeError(f"Animex page request failed after {_retry} retries")
 
 
-async def _fetch_json(url: str) -> Any:
+async def _fetch_json(url: str, _retry: int = 3) -> Any:
     client = get_cf_client()
-    try:
-        resp = await asyncio.wait_for(
-            client.get(url, headers=_API_HEADERS),
-            timeout=20.0,
-        )
-    except asyncio.TimeoutError:
-        raise RuntimeError(f"Animex API request timed out: {url}")
-    if resp.status_code != 200:
+    for attempt in range(_retry):
+        try:
+            resp = await asyncio.wait_for(
+                client.get(url, headers=_API_HEADERS),
+                timeout=20.0,
+            )
+        except asyncio.TimeoutError:
+            if attempt < _retry - 1:
+                await asyncio.sleep(1.5 * (attempt + 1))
+                continue
+            raise RuntimeError(f"Animex API request timed out: {url}")
+        if resp.status_code == 200:
+            return resp.json()
+        if resp.status_code in (403, 429) and attempt < _retry - 1:
+            wait = (2 ** attempt) + random.uniform(0.5, 1.5)
+            logger.warning("Animex API %s returned %d, retrying in %.1fs...", url, resp.status_code, wait)
+            await asyncio.sleep(wait)
+            continue
         raise RuntimeError(f"Animex API request failed: {resp.status_code}")
-    return resp.json()
+    raise RuntimeError(f"Animex API request failed after {_retry} retries")
 
 
 # ── Context (slug) resolution ─────────────────────────────────────────────────
@@ -152,7 +173,8 @@ async def _fetch_context(anime_id: str | int, title_data: dict, refresh: bool = 
                 last_err = e
         raise last_err or RuntimeError("Animex page not found")
 
-    return await get_cached_value(cache_key, 30 * 24 * 60 * 60 * 1000, loader, force_refresh=refresh)
+    # Slug is stable — cache for 7 days to minimize scraping requests per IP
+    return await get_cached_value(cache_key, 7 * 24 * 60 * 60 * 1000, loader, force_refresh=refresh)
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
